@@ -31,6 +31,13 @@ class SocialiteController extends Controller
 
         auth()->login($user);
 
-        return redirect()->intended(route('dashboard'));
+        if ($user->stores()->doesntExist()) {
+            return redirect()->route('stores.create');
+        }
+
+        $domain = config('app.domain', 'localhost');
+        $store = $user->currentStore ?? $user->stores()->first();
+
+        return redirect()->away("http://{$store->slug}.{$domain}");
     }
 }

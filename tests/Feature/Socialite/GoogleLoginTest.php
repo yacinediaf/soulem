@@ -21,7 +21,7 @@ test('google callback creates new user', function () {
 
     $response = $this->get(route('socialite.google.callback'));
 
-    $response->assertRedirect(route('dashboard'));
+    $response->assertRedirect(route('stores.create'));
 
     $this->assertDatabaseHas('users', [
         'name' => 'John Doe',
@@ -45,7 +45,7 @@ test('google callback links google account to existing user by email', function 
 
     $response = $this->get(route('socialite.google.callback'));
 
-    $response->assertRedirect(route('dashboard'));
+    $response->assertRedirect(route('stores.create'));
 
     $this->assertDatabaseHas('users', [
         'id' => $existingUser->id,
@@ -68,7 +68,7 @@ test('google callback does not create duplicate user when email exists', functio
 
     $response = $this->get(route('socialite.google.callback'));
 
-    $response->assertRedirect(route('dashboard'));
+    $response->assertRedirect(route('stores.create'));
 
     $this->assertDatabaseCount('users', 1);
 

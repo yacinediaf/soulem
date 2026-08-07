@@ -2,6 +2,7 @@
 
 namespace App\Http\Middleware;
 
+use App\ValueObjects\CurrentStore;
 use Illuminate\Http\Request;
 use Inertia\Middleware;
 
@@ -41,6 +42,23 @@ class HandleInertiaRequests extends Middleware
             'auth' => [
                 'user' => $request->user(),
             ],
+            'currentStore' => function () {
+                if (app()->bound(CurrentStore::class)) {
+                    $currentStore = app(CurrentStore::class);
+
+                    return [
+                        'id' => $currentStore->store->id,
+                        'name' => $currentStore->store->name,
+                        'slug' => $currentStore->store->slug,
+                        'plan' => [
+                            'name' => $currentStore->store->plan->name,
+                            'slug' => $currentStore->store->plan->slug,
+                        ],
+                    ];
+                }
+
+                return null;
+            },
             'sidebarOpen' => ! $request->hasCookie('sidebar_state') || $request->cookie('sidebar_state') === 'true',
         ];
     }
