@@ -30,4 +30,26 @@ class CreateNewUser implements CreatesNewUsers
             'password' => $input['password'],
         ]);
     }
+
+    /**
+     * Find an existing user or create a new one from socialite data.
+     *
+     * @param  array{id: string, name: string, email: string}  $socialUser
+     */
+    public function createOrFindFromSocialite(array $socialUser): User
+    {
+        $user = User::firstWhere('email', $socialUser['email']);
+
+        if ($user) {
+            $user->update(['google_id' => $socialUser['id']]);
+
+            return $user;
+        }
+
+        return User::create([
+            'name' => $socialUser['name'],
+            'email' => $socialUser['email'],
+            'google_id' => $socialUser['id'],
+        ]);
+    }
 }

@@ -1,0 +1,1438 @@
+# SaaS Ecommerce Platform — Complete Implementation TODO
+
+You are working on a Laravel SaaS application that helps new ecommerce businesses start and manage their online business.
+
+The application is **multi-tenant**, where a `Store` is the tenant.
+
+Implement the system feature-by-feature in the order defined below.
+
+Before modifying anything, inspect the existing Laravel application structure, models, migrations, authentication, relationships, routes, middleware, Inertia setup, and existing conventions.
+
+Follow existing project conventions whenever possible.
+
+Do not introduce unnecessary abstractions or third-party packages.
+
+---
+
+# BUSINESS MODEL
+
+A user creates a Store.
+
+Every Store starts on the **Free plan**.
+
+### Free
+
+Features:
+
+* Products
+* Orders
+
+When the Store reaches its first **20 orders**, it receives a **5-day Growth trial**.
+
+### Growth
+
+Features:
+
+* Products
+* Orders
+* Inventory
+* Notifications
+
+When the Store reaches its first **100 orders**, it receives a **5-day Pro trial**.
+
+### Pro
+
+Features:
+
+* Products
+* Orders
+* Inventory
+* Notifications
+* Additional Pro features can be added later.
+
+---
+
+# FEATURE SOURCES
+
+A Store can have features from multiple sources:
+
+1. Current plan
+2. Active plan trial
+3. Admin-granted features
+
+The effective feature set is the union of all active sources.
+
+Example:
+
+```text
+Current plan:
+Products
+Orders
+
+Active trial:
+Growth
+
+Growth features:
+Products
+Orders
+Inventory
+Notifications
+
+Admin grant:
+Analytics
+
+Effective features:
+Products
+Orders
+Inventory
+Notifications
+Analytics
+```
+
+The rest of the application should not care where a feature came from.
+
+It should simply be able to ask:
+
+```php
+$currentStore->hasFeature('inventory');
+```
+
+---
+
+# ARCHITECTURAL PRINCIPLES
+
+Follow these principles:
+
+1. `Store` is the tenant.
+2. The current Store is resolved once per request.
+3. The Store's current Plan is loaded with the Store.
+4. Features are resolved lazily.
+5. Feature resolution is cached for the current request.
+6. `StoreFeatureResolver` is responsible for assembling effective features.
+7. Plan, Trial, and Admin Grant feature sources remain separate.
+8. Middleware establishes request context; it does not resolve features.
+9. Do not hardcode feature availability using plan names.
+10. Do not hardcode plan IDs.
+11. Milestones must be data-driven.
+12. Milestone processing must be idempotent.
+13. Trials must not modify the Store's current plan.
+14. Expired trials/grants automatically stop providing features.
+15. Tenant isolation must be enforced for Store-owned resources.
+16. Use database constraints where appropriate.
+17. Use transactions for multi-step operations.
+18. Keep business logic out of controllers where possible.
+19. Follow existing Laravel conventions.
+20. Do not over-engineer the system.
+
+---
+
+# PROJECT STRUCTURE
+
+Use the existing project architecture if one already exists.
+
+Otherwise, a suitable structure is:
+
+```text
+app/
+├── Http/
+│   └── Middleware/
+│       └── ResolveCurrentStore.php
+│
+└── Services/
+    ├── Stores/
+    │   ├── CreateStore.php
+    │   ├── StoreResolver.php
+    │   └── CurrentStore.php
+    │
+    ├── Features/
+    │   ├── StoreFeatureResolver.php
+    │   ├── PlanFeatureProvider.php
+    │   ├── TrialFeatureProvider.php
+    │   └── GrantFeatureProvider.php
+    │
+    └── Milestones/
+        └── MilestoneService.php
+```
+
+Adapt this if the application already has an established domain/service structure.
+
+---
+
+# TODO 0 — STORE CREATION & TENANT INITIALIZATION
+
+Implement the complete Store creation flow before implementing the rest of the system.
+
+## Requirements
+
+When an authenticated user creates a Store:
+
+1. Create the Store.
+2. Assign the Free plan.
+3. Associate the user with the Store.
+4. Make the newly created Store the user's current Store.
+5. Redirect/use the Store as the active tenant.
+
+The operation must be transactional.
+
+Conceptually:
+
+```text
+CreateStore
+    ↓
+Create Store
+    ↓
+Assign Free Plan
+    ↓
+Attach User
+    ↓
+Set Current Store
+```
+
+---
+
+## Store Model
+
+Inspect the existing Store model.
+
+Use existing fields where possible.
+
+Typical fields may include:
+
+```text
+id
+name
+slug
+plan_id
+timestamps
+```
+
+Do not add unnecessary fields.
+
+---
+
+## User ↔ Store
+
+Inspect the existing relationship.
+
+The architecture should support:
+
+```text
+User
+ ├── Store A
+ ├── Store B
+ └── Store C
+```
+
+if multiple stores are supported.
+
+The application must distinguish:
+
+```text
+User's Stores
+```
+
+from:
+
+```text
+User's Current Store
+```
+
+Do not scatter logic such as:
+
+```php
+auth()->user()->stores()->first()
+```
+
+throughout the application.
+
+---
+
+## CreateStore Service
+
+Create a service such as:
+
+```text
+app/Services/Stores/CreateStore.php
+```
+
+Its responsibility is to initialize a Store correctly.
+
+Use a database transaction.
+
+The Free plan must be resolved by its stable identifier, not a hardcoded database ID.
+
+---
+
+## Acceptance Criteria
+
+* Authenticated user can create a Store.
+* Store receives Free plan.
+* Store is associated with the user.
+* Store becomes the current Store.
+* Creation is transactional.
+* Store is immediately usable.
+
+---
+
+# TODO 1 — PLANS
+
+Create the plan system.
+
+Create:
+
+```text
+plans
+```
+
+Suggested fields:
+
+```text
+id
+name
+slug
+timestamps
+```
+
+Initial plans:
+
+```text
+free
+growth
+pro
+```
+
+Create:
+
+```text
+Store → belongsTo → Plan
+Plan → hasMany → Stores
+```
+
+The Store should have one current plan.
+
+Do not hardcode plan IDs.
+
+Use stable slugs.
+
+---
+
+## Acceptance Criteria
+
+* Free, Growth, and Pro plans exist.
+* Plans are identified by stable slugs.
+* Stores belong to a plan.
+* New Stores receive Free automatically.
+
+---
+
+# TODO 2 — FEATURES
+
+Create:
+
+```text
+features
+```
+
+Suggested fields:
+
+```text
+id
+name
+key
+timestamps
+```
+
+Initial features:
+
+```text
+products
+orders
+inventory
+notifications
+```
+
+The `key` is the stable identifier used by application code.
+
+Example:
+
+```php
+$store->hasFeature('inventory');
+```
+
+The system must allow future features without changing the feature-resolution architecture.
+
+---
+
+# TODO 3 — PLAN ↔ FEATURE RELATIONSHIP
+
+Create:
+
+```text
+plan_feature
+```
+
+Relationships:
+
+```text
+Plan → belongsToMany → Features
+Feature → belongsToMany → Plans
+```
+
+Initial configuration:
+
+```text
+Free:
+- products
+- orders
+
+Growth:
+- products
+- orders
+- inventory
+- notifications
+
+Pro:
+- products
+- orders
+- inventory
+- notifications
+```
+
+Do not implement:
+
+```php
+if ($plan->slug === 'growth') {
+    ...
+}
+```
+
+Feature availability must be data-driven.
+
+---
+
+# TODO 4 — CURRENT STORE RESOLUTION
+
+Implement:
+
+```text
+StoreResolver
+CurrentStore
+ResolveCurrentStore middleware
+```
+
+The `StoreResolver` determines which Store the authenticated user is currently operating.
+
+The exact resolution strategy should follow the existing application.
+
+Possible future strategies:
+
+```text
+Session
+Subdomain
+Custom domain
+Route parameter
+User-selected store
+```
+
+Do not assume a specific strategy if the existing application already defines one.
+
+---
+
+## Middleware
+
+The middleware should:
+
+1. Ensure authentication.
+2. Resolve the current Store.
+3. Eager load its current Plan.
+4. Bind the current Store into the Laravel container.
+5. Continue the request.
+
+Do NOT resolve features here.
+
+---
+
+## CurrentStore
+
+Provide a request-level object:
+
+```php
+$currentStore = app(CurrentStore::class);
+
+$currentStore->store;
+$currentStore->store->plan;
+```
+
+The current Store must never leak between requests.
+
+---
+
+# TODO 5 — STORE FEATURE RESOLVER
+
+Implement:
+
+```text
+StoreFeatureResolver
+```
+
+Responsibilities:
+
+```text
+Store
+ ↓
+Plan features
+ +
+Active trial features
+ +
+Active admin grants
+ ↓
+Effective features
+```
+
+Expose methods similar to:
+
+```php
+resolve(Store $store): Collection
+
+has(Store $store, string $featureKey): bool
+```
+
+Features must be unique.
+
+The resolver must not contain milestone logic.
+
+The resolver must not contain order logic.
+
+---
+
+# TODO 6 — PLAN FEATURE PROVIDER
+
+Implement:
+
+```text
+PlanFeatureProvider
+```
+
+Responsibilities:
+
+* Get the Store's current Plan.
+* Return its features.
+
+It should know nothing about:
+
+* Trials
+* Admin grants
+* Milestones
+
+---
+
+# TODO 7 — TRIAL SYSTEM
+
+Create:
+
+```text
+store_trials
+```
+
+Suggested fields:
+
+```text
+id
+store_id
+plan_id
+starts_at
+ends_at
+activated_at
+timestamps
+```
+
+A trial belongs to:
+
+```text
+Store
+Plan
+```
+
+A Store may have historical trials.
+
+The current Store plan does NOT change when a trial starts.
+
+Example:
+
+```text
+Current plan:
+Free
+
+Active trial:
+Growth
+```
+
+---
+
+# TODO 8 — TRIAL FEATURE PROVIDER
+
+Implement:
+
+```text
+TrialFeatureProvider
+```
+
+Responsibilities:
+
+1. Find active trials.
+2. Get their plans.
+3. Get the features belonging to those plans.
+4. Return those features.
+
+A trial is active only when:
+
+```text
+starts_at <= now
+AND
+ends_at > now
+```
+
+Expired trials must provide no features.
+
+---
+
+# TODO 9 — ADMIN FEATURE GRANTS
+
+Create:
+
+```text
+store_feature_grants
+```
+
+Suggested fields:
+
+```text
+id
+store_id
+feature_id
+source
+expires_at
+timestamps
+```
+
+The system must support:
+
+### Permanent grant
+
+```text
+expires_at = null
+```
+
+### Temporary grant
+
+```text
+expires_at = future date
+```
+
+Example:
+
+```text
+Inventory
+source = admin
+expires_at = null
+```
+
+The `source` field should make it possible to distinguish grants in the future.
+
+---
+
+# TODO 10 — GRANT FEATURE PROVIDER
+
+Implement:
+
+```text
+GrantFeatureProvider
+```
+
+Responsibilities:
+
+* Get active Store feature grants.
+* Ignore expired grants.
+* Return their features.
+
+It must not know anything about:
+
+* Plans
+* Trials
+* Milestones
+
+---
+
+# TODO 11 — FINAL FEATURE RESOLUTION
+
+Complete:
+
+```text
+StoreFeatureResolver
+```
+
+Combine:
+
+```text
+PlanFeatureProvider
++
+TrialFeatureProvider
++
+GrantFeatureProvider
+```
+
+Example:
+
+```text
+Free:
+products
+orders
+
+Growth trial:
+products
+orders
+inventory
+notifications
+
+Admin:
+analytics
+```
+
+Result:
+
+```text
+products
+orders
+inventory
+notifications
+analytics
+```
+
+Remove duplicates.
+
+The rest of the application should not need to know which provider supplied the feature.
+
+---
+
+# TODO 12 — LAZY FEATURE RESOLUTION
+
+`CurrentStore` should expose:
+
+```php
+$currentStore->features();
+
+$currentStore->hasFeature('inventory');
+```
+
+Feature resolution must be lazy.
+
+Do not resolve features during middleware execution.
+
+Only resolve when requested.
+
+Cache the resolved features for the current request.
+
+Example:
+
+```php
+$currentStore->hasFeature('inventory');
+$currentStore->hasFeature('notifications');
+$currentStore->hasFeature('orders');
+```
+
+The database should not be queried repeatedly for every call.
+
+---
+
+# TODO 13 — INERTIA SHARED DATA
+
+Expose the current Store through Inertia.
+
+`HandleInertiaRequests` should use the already-resolved `CurrentStore`.
+
+It should not independently resolve the Store.
+
+Expose only the frontend data needed.
+
+For example:
+
+```text
+currentStore:
+    id
+    name
+    plan:
+        name
+        slug
+    features:
+        products
+        orders
+        inventory
+        notifications
+```
+
+Do not blindly serialize the entire Store model.
+
+Use a Resource/DTO/transformer if appropriate.
+
+The frontend should be able to use:
+
+```js
+page.props.currentStore.plan
+```
+
+and:
+
+```js
+page.props.currentStore.features
+```
+
+---
+
+# TODO 14 — FEATURE AUTHORIZATION
+
+Implement a clean feature authorization mechanism.
+
+The application should be able to protect functionality with:
+
+```php
+$currentStore->hasFeature('inventory');
+```
+
+For example:
+
+```php
+if (! $currentStore->hasFeature('inventory')) {
+    abort(403);
+}
+```
+
+If appropriate, introduce:
+
+* Middleware
+* Gates
+* Policies
+
+But these must delegate to the existing feature resolver.
+
+Do not duplicate plan/feature logic.
+
+---
+
+# TODO 15 — MILESTONES
+
+Create:
+
+```text
+milestones
+```
+
+Suggested fields:
+
+```text
+id
+name
+orders_required
+trial_plan_id
+trial_days
+timestamps
+```
+
+Initial milestones:
+
+```text
+20 orders → Growth → 5 days
+
+100 orders → Pro → 5 days
+```
+
+The milestone should reference the Plan through a relationship.
+
+Do not hardcode:
+
+```text
+20
+100
+Growth
+Pro
+```
+
+inside business logic.
+
+---
+
+# TODO 16 — STORE MILESTONE COMPLETION
+
+Create:
+
+```text
+store_milestones
+```
+
+Suggested fields:
+
+```text
+id
+store_id
+milestone_id
+completed_at
+timestamps
+```
+
+Add appropriate uniqueness constraints so the same milestone cannot be awarded twice to the same Store.
+
+This is essential for idempotency.
+
+---
+
+# TODO 17 — MILESTONE SERVICE
+
+Implement:
+
+```text
+MilestoneService
+```
+
+Responsibilities:
+
+1. Determine the Store's relevant order count.
+2. Find milestones that have been reached.
+3. Ignore already-completed milestones.
+4. Mark new milestones as completed.
+5. Create the corresponding trial.
+6. Ensure the entire operation is safe against duplicate execution.
+
+Do not put milestone logic directly inside controllers.
+
+Do not put milestone logic directly inside the Order model.
+
+---
+
+# TODO 18 — ORDER INTEGRATION
+
+Integrate milestone evaluation with the Order lifecycle.
+
+First inspect the existing Order model and statuses.
+
+Determine what "receives an order" means in the existing application.
+
+For example, if orders have:
+
+```text
+pending
+confirmed
+cancelled
+completed
+```
+
+do not simply count every created Order.
+
+Use the appropriate business state.
+
+Prefer an existing domain event such as:
+
+```text
+OrderCompleted
+```
+
+or create an appropriate event/listener if necessary.
+
+Conceptually:
+
+```text
+Order reaches valid state
+        ↓
+OrderCompleted event
+        ↓
+MilestoneService
+        ↓
+Check milestones
+        ↓
+Award new trials
+```
+
+The operation must be idempotent.
+
+---
+
+# TODO 19 — TRIAL EXPIRATION
+
+Do not require a scheduled job just to determine whether a trial is active.
+
+A trial's availability should be determined from its timestamps.
+
+When:
+
+```text
+ends_at <= now
+```
+
+the trial is no longer active.
+
+The Store does not need to be downgraded.
+
+Example:
+
+```text
+Free plan
++
+Expired Growth trial
+=
+Free features
+```
+
+No manual cleanup is required for feature resolution.
+
+A scheduled job can be introduced later if the application needs expiration notifications or other side effects.
+
+---
+
+# TODO 20 — TENANT ISOLATION
+
+Ensure Store-owned resources are scoped to the current Store.
+
+For example:
+
+```text
+Store
+ ├── Products
+ ├── Orders
+ ├── Inventory
+ ├── Notifications
+ └── ...
+```
+
+Every tenant-owned record should contain the appropriate:
+
+```text
+store_id
+```
+
+or belong through an appropriate tenant relationship.
+
+Never trust a Store ID supplied by the frontend without verifying ownership/access.
+
+Avoid patterns like:
+
+```php
+Product::find($id);
+```
+
+when operating on tenant resources.
+
+Prefer:
+
+```php
+$currentStore->store
+    ->products()
+    ->findOrFail($id);
+```
+
+or an equivalent scoped query.
+
+Tenant isolation is a security boundary.
+
+---
+
+# TODO 21 — STORE SWITCHING
+
+If the application supports multiple Stores per user, implement Store switching.
+
+The user should be able to select:
+
+```text
+Store A
+Store B
+Store C
+```
+
+The selected Store becomes the current Store for subsequent requests.
+
+The `StoreResolver` should be the only component responsible for interpreting the current-store context.
+
+The rest of the application should continue using:
+
+```php
+app(CurrentStore::class)
+```
+
+without caring how the Store was selected.
+
+Ensure users cannot switch to a Store they do not have access to.
+
+---
+
+# TODO 22 — DATABASE CONSTRAINTS & INDEXES
+
+Review all migrations and add appropriate constraints/indexes.
+
+Important relationships include:
+
+```text
+stores.plan_id
+store_trials.store_id
+store_trials.plan_id
+store_feature_grants.store_id
+store_feature_grants.feature_id
+milestones.trial_plan_id
+store_milestones.store_id
+store_milestones.milestone_id
+```
+
+Important uniqueness constraints include:
+
+```text
+plans.slug
+features.key
+store_milestones(store_id, milestone_id)
+```
+
+Review whether additional indexes are needed for:
+
+* Store queries
+* Active trials
+* Feature grants
+* Milestone lookup
+* Order counting
+
+Use appropriate foreign key behavior.
+
+---
+
+# TODO 23 — TESTING
+
+Write tests for every major component.
+
+## Store Creation
+
+Test:
+
+* Authenticated user can create Store.
+* Store receives Free plan.
+* Store belongs to creating user.
+* Store becomes current Store.
+* Creation is transactional.
+* Unauthorized users cannot create Stores.
+
+---
+
+## Current Store
+
+Test:
+
+* Current Store resolves correctly.
+* Current Store belongs to authenticated user.
+* Current Store contains its Plan.
+* Store context is available through the container.
+* Store context cannot leak between requests.
+* User cannot access another user's Store.
+
+---
+
+## Plans
+
+Test:
+
+* Free plan exists.
+* Growth plan exists.
+* Pro plan exists.
+* Store belongs to one plan.
+* Free contains Products and Orders.
+* Growth contains Inventory and Notifications.
+* Pro contains expected features.
+
+---
+
+## Features
+
+Test:
+
+```text
+Store on Free
+→ products = true
+→ orders = true
+→ inventory = false
+```
+
+---
+
+## Trials
+
+Test:
+
+```text
+Free + active Growth trial
+→ inventory = true
+→ notifications = true
+```
+
+Test:
+
+```text
+Free + expired Growth trial
+→ inventory = false
+→ notifications = false
+```
+
+---
+
+## Admin Grants
+
+Test:
+
+```text
+Free + permanent Inventory grant
+→ inventory = true
+```
+
+Test:
+
+```text
+Free + active temporary Inventory grant
+→ inventory = true
+```
+
+Test:
+
+```text
+Free + expired temporary Inventory grant
+→ inventory = false
+```
+
+---
+
+## Feature Combination
+
+Test:
+
+```text
+Plan
++
+Trial
++
+Admin Grant
+```
+
+and verify that all active features are merged and duplicates are removed.
+
+---
+
+## Milestones
+
+Test:
+
+```text
+19 orders
+→ no Growth trial
+
+20 orders
+→ Growth trial
+
+21 orders
+→ no second Growth trial
+```
+
+Test:
+
+```text
+99 orders
+→ no Pro trial
+
+100 orders
+→ Pro trial
+
+101 orders
+→ no second Pro trial
+```
+
+Test repeated event processing to ensure duplicate trials cannot be created.
+
+---
+
+# TODO 24 — FEATURE API
+
+Ensure the final developer-facing API is simple.
+
+The preferred API should be:
+
+```php
+$currentStore->hasFeature('products');
+
+$currentStore->hasFeature('orders');
+
+$currentStore->hasFeature('inventory');
+
+$currentStore->hasFeature('notifications');
+
+$currentStore->features();
+
+$currentStore->store;
+
+$currentStore->store->plan;
+```
+
+The application developer should NOT need to write:
+
+```php
+if ($store->plan->slug === 'growth')
+```
+
+or:
+
+```php
+if ($store->plan_id === 2)
+```
+
+or:
+
+```php
+if ($store->trial && ...)
+```
+
+Feature checks must remain completely independent of the feature source.
+
+---
+
+# TODO 25 — FINAL ARCHITECTURE REVIEW
+
+After implementation, review the entire system.
+
+Verify the following flow:
+
+```text
+User
+ │
+ │ creates
+ ▼
+Store
+ │
+ ├── Free Plan
+ │     ├── Products
+ │     └── Orders
+ │
+ │ receives 20 orders
+ ▼
+Growth Trial
+ │
+ ├── Products
+ ├── Orders
+ ├── Inventory
+ └── Notifications
+ │
+ │ trial expires
+ ▼
+Free Plan features
+ │
+ │ receives 100 orders
+ ▼
+Pro Trial
+ │
+ └── Pro Features
+```
+
+At any point:
+
+```text
+Admin Grant
+      │
+      ▼
+Additional Feature
+```
+
+The final feature calculation is:
+
+```text
+Effective Features
+=
+Current Plan Features
++
+Active Trial Features
++
+Active Admin Grants
+```
+
+---
+
+# IMPLEMENTATION RULES
+
+Follow these rules strictly:
+
+1. Inspect existing code before creating new classes.
+2. Reuse existing models and relationships when appropriate.
+3. Do not duplicate existing functionality.
+4. Do not hardcode plan IDs.
+5. Do not hardcode feature availability by plan slug.
+6. Do not resolve features inside `ResolveCurrentStore`.
+7. Resolve the Store in middleware.
+8. Eager load the Store's current Plan.
+9. Resolve features lazily.
+10. Cache features for the current request.
+11. Keep PlanFeatureProvider independent from TrialFeatureProvider.
+12. Keep TrialFeatureProvider independent from GrantFeatureProvider.
+13. Keep GrantFeatureProvider independent from PlanFeatureProvider.
+14. `StoreFeatureResolver` combines the providers.
+15. Trials never modify the Store's current plan.
+16. Expired trials automatically stop providing features.
+17. Expired grants automatically stop providing features.
+18. Milestones must be configurable through database records.
+19. Milestone processing must be idempotent.
+20. Use transactions for Store creation and milestone/trial awarding where appropriate.
+21. Use events/listeners where they naturally fit the existing architecture.
+22. Keep controllers thin.
+23. Keep tenant isolation strict.
+24. Do not introduce unnecessary packages.
+25. Write tests as each feature is implemented.
+26. Run the relevant test suite after each feature.
+27. Do not move to the next TODO while the previous feature is broken.
+28. Do not over-engineer for hypothetical requirements.
+29. Keep the final API simple for application developers.
+30. At the end, provide a summary of all files changed, migrations created, services added, tests added, and any assumptions.
+
+---
+
+# EXPECTED END RESULT
+
+The final system should allow the application developer to write:
+
+```php
+$currentStore = app(CurrentStore::class);
+
+if ($currentStore->hasFeature('inventory')) {
+    // Inventory functionality
+}
+```
+
+without knowing whether Inventory was obtained from:
+
+```text
+Growth plan
+        OR
+Growth trial
+        OR
+Admin grant
+```
+
+The system should also support future sources such as:
+
+```text
+Promotion
+Coupon
+Referral
+Enterprise agreement
+Manual support override
+```
+
+without requiring a redesign of the feature-checking API.
+
+The core abstraction should remain:
+
+```text
+Store
+   ↓
+CurrentStore
+   ↓
+StoreFeatureResolver
+   ↓
+Effective Features
+```
+
+and the feature sources should remain independently replaceable/extensible.
